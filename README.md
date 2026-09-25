@@ -4,7 +4,7 @@ Sumi turns a picture into Japanese character art and saves it as a PNG or a WebP
 
 ![Sumi showing a photo redrawn in Japanese characters](docs/sumi.png)
 
-Open a photo, move the sliders, and the preview redraws. Detail controls how many characters fit across the picture. Character size controls how large those characters are in the file you save. WebP is written lossless so the strokes stay sharp.
+The window follows the Omarchy theme that is applied right now, including the accent color, and updates if you switch themes. Open a photo, move the sliders, and the preview redraws. Detail controls how many characters fit across the picture. Character size controls how large those characters are in the file you save. WebP is written lossless so the strokes stay sharp.
 
 ## Run the window
 

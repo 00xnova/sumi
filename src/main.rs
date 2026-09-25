@@ -7,7 +7,7 @@ mod gui;
 use anyhow::{Result, anyhow};
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
-use sumi::{ColorMode, Engine, Params, Preset, Style, load_image, save_image};
+use sumi::{ColorMode, Engine, Palette, Params, Preset, Style, load_image, save_image};
 
 #[derive(Parser)]
 #[command(
@@ -156,7 +156,7 @@ fn render_file(settings: RenderSettings) -> Result<()> {
         let preset = Preset::parse(&name).ok_or_else(|| {
             anyhow!("unknown preset '{name}'. Use color, paper, screen, or stamp.")
         })?;
-        preset.apply(&mut params);
+        preset.apply_with(&mut params, Palette::load().as_ref());
     }
     if let Some(columns) = settings.columns {
         params.columns = columns;

@@ -28,7 +28,15 @@ pub struct Glyph {
     pub coverage: f32,
     pub score: f32,
     pub blank: bool,
+    /// A filled or empty geometric box, not a written character.
+    pub shape: bool,
     pub mask: Vec<u8>,
+}
+
+pub struct RampQuery {
+    pub levels: usize,
+    pub allow_blank: bool,
+    pub allow_shapes: bool,
 }
 
 pub struct Atlas {
@@ -135,6 +143,7 @@ pub fn build_atlas(
             coverage,
             score: uniformity + bonus,
             blank: is_blank,
+            shape: is_shape(ch),
             mask,
         });
     }
@@ -150,15 +159,34 @@ pub fn build_atlas(
     })
 }
 
-pub fn select_ramp(glyphs: &[Glyph], levels: usize) -> Vec<usize> {
+pub fn select_ramp(glyphs: &[Glyph], query: RampQuery) -> Vec<usize> {
     if glyphs.is_empty() {
         return Vec::new();
     }
-    let mut order: Vec<usize> = (0..glyphs.len()).collect();
-    order.sort_by(|&a, &b| glyphs[a].coverage.total_cmp(&glyphs[b].coverage));
-    let levels = levels.clamp(2, glyphs.len());
-    let lo = glyphs[order[0]].coverage;
-    let hi = glyphs[*order.last().unwrap()].coverage;
+    let mut eligible: Vec<usize> = (0..glyphs.len())
+        .filter(|&index| {
+            let glyph = &glyphs[index];
+            if glyph.blank && !query.allow_blank {
+                return false;
+            }
+            if glyph.shape && !query.allow_shapes {
+                return false;
+            }
+            true
+        })
+        .collect();
+    if eligible.len() < 2 {
+        eligible = (0..glyphs.len())
+            .filter(|&index| !glyphs[index].blank)
+            .collect();
+    }
+    if eligible.len() < 2 {
+        eligible = (0..glyphs.len()).collect();
+    }
+    eligible.sort_by(|&a, &b| glyphs[a].coverage.total_cmp(&glyphs[b].coverage));
+    let levels = query.levels.clamp(2, eligible.len());
+    let lo = glyphs[eligible[0]].coverage;
+    let hi = glyphs[*eligible.last().unwrap()].coverage;
     let mut used = vec![false; glyphs.len()];
     let mut chosen = Vec::with_capacity(levels);
 
@@ -171,7 +199,7 @@ pub fn select_ramp(glyphs: &[Glyph], levels: usize) -> Vec<usize> {
         let window = ((hi - lo) / levels as f32).max(0.001) * 0.8;
         let mut best: Option<usize> = None;
         let mut best_key = f32::MIN;
-        for &index in &order {
+        for &index in &eligible {
             if used[index] {
                 continue;
             }
@@ -186,7 +214,7 @@ pub fn select_ramp(glyphs: &[Glyph], levels: usize) -> Vec<usize> {
             }
         }
         let index = best.unwrap_or_else(|| {
-            order
+            eligible
                 .iter()
                 .copied()
                 .filter(|index| !used[*index])
@@ -195,23 +223,38 @@ pub fn select_ramp(glyphs: &[Glyph], levels: usize) -> Vec<usize> {
                         .abs()
                         .total_cmp(&(glyphs[b].coverage - target).abs())
                 })
-                .unwrap_or(order[0])
+                .unwrap_or(eligible[0])
         });
         used[index] = true;
         chosen.push(index);
     }
 
-    if let Some(blank) = glyphs.iter().position(|glyph| glyph.blank)
-        && !chosen.contains(&blank)
-    {
-        chosen.insert(0, blank);
-        if chosen.len() > levels {
-            chosen.remove(1);
-        }
-    }
-
     chosen.sort_by(|&a, &b| glyphs[a].coverage.total_cmp(&glyphs[b].coverage));
     chosen
+}
+
+fn is_shape(ch: char) -> bool {
+    matches!(
+        ch,
+        '■' | '□'
+            | '●'
+            | '○'
+            | '◆'
+            | '◇'
+            | '▲'
+            | '△'
+            | '▼'
+            | '▽'
+            | '★'
+            | '☆'
+            | '〇'
+            | '◯'
+            | '◎'
+            | '▪'
+            | '▫'
+            | '⬛'
+            | '⬜'
+    )
 }
 
 fn pool(style: Style) -> Vec<char> {
@@ -417,5 +460,40 @@ mod tests {
             return 0.0;
         }
         moment / weight / height as f32
+    }
+
+    #[test]
+    fn default_ramp_uses_written_characters() {
+        let glyphs = [
+            glyph('　', 0.0, true, false),
+            glyph('こ', 0.12, false, false),
+            glyph('目', 0.34, false, false),
+            glyph('鷹', 0.62, false, false),
+            glyph('■', 0.94, false, true),
+        ];
+        let ramp = select_ramp(
+            &glyphs,
+            RampQuery {
+                levels: 4,
+                allow_blank: false,
+                allow_shapes: false,
+            },
+        );
+        let chars: String = ramp.iter().map(|&index| glyphs[index].ch).collect();
+        assert!(!chars.contains('　'), "{chars}");
+        assert!(!chars.contains('■'), "{chars}");
+        assert!(chars.contains('こ'), "{chars}");
+        assert!(chars.contains('鷹'), "{chars}");
+    }
+
+    fn glyph(ch: char, coverage: f32, blank: bool, shape: bool) -> Glyph {
+        Glyph {
+            ch,
+            coverage,
+            score: 1.0,
+            blank,
+            shape,
+            mask: Vec::new(),
+        }
     }
 }

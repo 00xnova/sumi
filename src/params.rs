@@ -103,35 +103,64 @@ impl Preset {
 
     /// Replace ink, background, and color mode. Detail sliders stay as they are.
     pub fn apply(self, params: &mut Params) {
+        self.apply_with(params, None);
+    }
+
+    /// Like [`Self::apply`], using the current Omarchy palette when one is passed in.
+    pub fn apply_with(self, params: &mut Params, palette: Option<&crate::Palette>) {
         params.invert = false;
         match self {
             Self::Color => {
                 params.color_mode = ColorMode::Image;
-                params.background = Rgb::new(16, 14, 13);
-                params.ink = Rgb::new(242, 236, 226);
+                if let Some(palette) = palette {
+                    params.background = palette.background;
+                    params.ink = palette.foreground;
+                } else {
+                    params.background = Rgb::new(16, 14, 13);
+                    params.ink = Rgb::new(242, 236, 226);
+                }
             }
             Self::Paper => {
                 params.color_mode = ColorMode::Ink;
-                params.background = Rgb::new(245, 240, 230);
-                params.ink = Rgb::new(32, 26, 22);
+                if let Some(palette) = palette.filter(|palette| !palette.dark) {
+                    params.background = palette.background;
+                    params.ink = palette.foreground;
+                } else {
+                    params.background = Rgb::new(245, 240, 230);
+                    params.ink = Rgb::new(32, 26, 22);
+                }
             }
             Self::Screen => {
                 params.color_mode = ColorMode::Ink;
-                params.background = Rgb::new(14, 15, 18);
-                params.ink = Rgb::new(232, 232, 228);
+                if let Some(palette) = palette {
+                    params.background = palette.background;
+                    params.ink = palette.foreground;
+                } else {
+                    params.background = Rgb::new(14, 15, 18);
+                    params.ink = Rgb::new(232, 232, 228);
+                }
             }
             Self::Stamp => {
                 params.color_mode = ColorMode::Ink;
-                params.background = Rgb::new(246, 239, 226);
-                params.ink = Rgb::new(176, 42, 36);
+                if let Some(palette) = palette {
+                    params.ink = palette.red;
+                    params.background = palette.background;
+                } else {
+                    params.background = Rgb::new(246, 239, 226);
+                    params.ink = Rgb::new(176, 42, 36);
+                }
             }
         }
     }
 
     pub fn matching(params: &Params) -> Option<Self> {
+        Self::matching_with(params, None)
+    }
+
+    pub fn matching_with(params: &Params, palette: Option<&crate::Palette>) -> Option<Self> {
         Self::all().into_iter().find(|preset| {
             let mut trial = *params;
-            preset.apply(&mut trial);
+            preset.apply_with(&mut trial, palette);
             trial.color_mode == params.color_mode
                 && trial.ink == params.ink
                 && trial.background == params.background
@@ -159,6 +188,18 @@ pub struct Params {
     pub weight: f32,
     /// Saturation of colors sampled from the photo. 1 is unchanged.
     pub saturation: f32,
+    /// 0 lets the brightest tones use an empty square. Higher keeps a written character there.
+    #[serde(default = "default_character_floor")]
+    pub character_floor: f32,
+    /// 1 uses the heaviest character for black. Lower stops before the ink turns into a solid mass.
+    #[serde(default = "default_character_ceiling")]
+    pub character_ceiling: f32,
+    /// Let the brightest cells be an empty square.
+    #[serde(default)]
+    pub allow_blank: bool,
+    /// Let the darkest cells be a filled geometric block.
+    #[serde(default)]
+    pub solid_blocks: bool,
     pub invert: bool,
     pub dither: bool,
     pub color_mode: ColorMode,
@@ -180,6 +221,10 @@ impl Default for Params {
             outlines: 0.22,
             weight: 1.25,
             saturation: 1.12,
+            character_floor: default_character_floor(),
+            character_ceiling: default_character_ceiling(),
+            allow_blank: false,
+            solid_blocks: false,
             invert: false,
             dither: true,
             color_mode: ColorMode::Image,
@@ -202,8 +247,23 @@ impl Params {
         self.outlines = finite(self.outlines, 0.0).clamp(0.0, 1.5);
         self.weight = finite(self.weight, 1.0).clamp(0.4, 2.4);
         self.saturation = finite(self.saturation, 1.0).clamp(0.0, 2.2);
+        self.character_floor =
+            finite(self.character_floor, default_character_floor()).clamp(0.0, 0.85);
+        self.character_ceiling =
+            finite(self.character_ceiling, default_character_ceiling()).clamp(0.25, 1.0);
+        if self.character_ceiling < self.character_floor + 0.05 {
+            self.character_ceiling = (self.character_floor + 0.05).min(1.0);
+        }
         self
     }
+}
+
+fn default_character_floor() -> f32 {
+    0.34
+}
+
+fn default_character_ceiling() -> f32 {
+    1.0
 }
 
 fn finite(value: f32, fallback: f32) -> f32 {

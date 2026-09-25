@@ -132,7 +132,14 @@ impl Engine {
             .as_ref()
             .expect("atlas was just built")
             .atlas_ref();
-        let ramp = glyphs::select_ramp(&atlas.glyphs, params.levels as usize);
+        let ramp = glyphs::select_ramp(
+            &atlas.glyphs,
+            glyphs::RampQuery {
+                levels: params.levels as usize,
+                allow_blank: params.allow_blank,
+                allow_shapes: params.solid_blocks,
+            },
+        );
         if ramp.is_empty() {
             bail!("no characters were available to draw with");
         }
@@ -142,7 +149,15 @@ impl Engine {
             .iter()
             .map(|&index| atlas.glyphs[index].coverage)
             .collect();
-        let chosen = choose_glyphs(&ink, grid.columns, grid.rows, &ramp_cov, params.dither);
+        let chosen = choose_glyphs(
+            &ink,
+            grid.columns,
+            grid.rows,
+            &ramp_cov,
+            params.character_floor,
+            params.character_ceiling,
+            params.dither,
+        );
         let characters: String = ramp.iter().map(|&index| atlas.glyphs[index].ch).collect();
         let image = stamp(
             &self.samples,
@@ -407,11 +422,21 @@ fn edge_map(luma: &[f32], columns: u32, rows: u32) -> Vec<f32> {
     magnitude
 }
 
-fn choose_glyphs(ink: &[f32], columns: u32, rows: u32, ramp: &[f32], dither: bool) -> Vec<u16> {
+fn choose_glyphs(
+    ink: &[f32],
+    columns: u32,
+    rows: u32,
+    ramp: &[f32],
+    floor: f32,
+    ceiling: f32,
+    dither: bool,
+) -> Vec<u16> {
     let mut buffer = ink.to_vec();
     let mut chosen = vec![0u16; ink.len()];
     let lo = ramp[0];
     let span = (ramp[ramp.len() - 1] - lo).max(1.0e-4);
+    let floor = floor.clamp(0.0, 0.9);
+    let ceiling = ceiling.max(floor + 0.05).min(1.0);
 
     for y in 0..rows {
         let reverse = dither && y % 2 == 1;
@@ -419,7 +444,8 @@ fn choose_glyphs(ink: &[f32], columns: u32, rows: u32, ramp: &[f32], dither: boo
             let x = if reverse { columns - 1 - step } else { step };
             let index = (y * columns + x) as usize;
             let value = buffer[index].clamp(0.0, 1.0);
-            let target = lo + value * span;
+            let shaped = floor + (ceiling - floor) * value;
+            let target = lo + shaped * span;
             let glyph = nearest(target, ramp);
             chosen[index] = glyph as u16;
             if dither {
@@ -620,6 +646,10 @@ mod tests {
         params.brightness = 0.0;
         params.gamma = 1.0;
         params.weight = 1.0;
+        params.character_floor = 0.0;
+        params.character_ceiling = 1.0;
+        params.allow_blank = true;
+        params.solid_blocks = true;
         params.color_mode = ColorMode::Ink;
 
         let gradient = gradient_image(96, 32);

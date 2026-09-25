@@ -4,19 +4,41 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant, SystemTime};
 
 use eframe::egui;
 use image::RgbaImage;
 use sumi::{
-    ColorMode, Engine, FontMetrics, GridSpec, Params, Preset, Rgb, Stats, Style, fit_edge,
+    ColorMode, Engine, FontMetrics, GridSpec, Palette, Params, Preset, Rgb, Stats, Style, fit_edge,
     load_image, save_image,
 };
 
-const ACCENT: egui::Color32 = egui::Color32::from_rgb(196, 72, 48);
-const INK: egui::Color32 = egui::Color32::from_rgb(243, 239, 230);
-const MUTED: egui::Color32 = egui::Color32::from_rgb(176, 164, 148);
 const PREVIEW_EDGE: u32 = 2000;
+
+struct Chrome {
+    accent: egui::Color32,
+    on_accent: egui::Color32,
+    text: egui::Color32,
+    muted: egui::Color32,
+    error: egui::Color32,
+}
+
+impl Chrome {
+    fn from_palette(palette: &Palette) -> Self {
+        let on_accent = if palette.accent.luma() > 0.62 {
+            palette.background
+        } else {
+            palette.foreground
+        };
+        Self {
+            accent: rgb(palette.accent),
+            on_accent: rgb(on_accent),
+            text: rgb(palette.foreground),
+            muted: rgb(palette.muted),
+            error: rgb(palette.red),
+        }
+    }
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum View {
@@ -52,8 +74,9 @@ pub fn launch(image: Option<PathBuf>) -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Sumi")
-            .with_inner_size([1280.0, 840.0])
-            .with_min_inner_size([960.0, 640.0])
+            .with_app_id("sumi")
+            .with_inner_size([1100.0, 720.0])
+            .with_min_inner_size([720.0, 480.0])
             .with_icon(icon)
             .with_drag_and_drop(true),
         persist_window: true,
@@ -90,6 +113,11 @@ struct SumiApp {
     generation: u64,
     sent_source: Option<u64>,
     sent_params: Option<Params>,
+    palette: Palette,
+    chrome: Chrome,
+    followed_preset: Option<Preset>,
+    theme_mtime: Option<SystemTime>,
+    theme_check: Instant,
     view: View,
     fit: bool,
     zoom: f32,
@@ -100,7 +128,9 @@ struct SumiApp {
 
 impl SumiApp {
     fn new(cc: &eframe::CreationContext<'_>, image: Option<PathBuf>) -> Self {
-        apply_theme(&cc.egui_ctx);
+        let palette = Palette::load().unwrap_or_else(Palette::fallback);
+        let chrome = Chrome::from_palette(&palette);
+        apply_chrome(&cc.egui_ctx, &palette);
         let (job_tx, job_rx) = mpsc::channel::<Job>();
         let (event_tx, event_rx) = mpsc::channel::<WorkerEvent>();
         let ctx = cc.egui_ctx.clone();
@@ -110,10 +140,20 @@ impl SumiApp {
             .ok();
 
         let mut params = Params::default();
-        if let Some(storage) = cc.storage
-            && let Some(saved) = eframe::get_value::<Params>(storage, "sumi-params")
-        {
-            params = saved.sanitize();
+        let mut followed_preset = None;
+        if let Some(storage) = cc.storage {
+            if let Some(saved) = eframe::get_value::<Params>(storage, "sumi-params") {
+                params = saved.sanitize();
+            }
+            if let Some(name) = eframe::get_value::<String>(storage, "sumi-followed-preset") {
+                followed_preset = Preset::parse(&name);
+            }
+        }
+        if let Some(preset) = followed_preset {
+            preset.apply_with(&mut params, Some(&palette));
+        } else if let Some(preset) = Preset::matching(&params) {
+            preset.apply_with(&mut params, Some(&palette));
+            followed_preset = Some(preset);
         }
 
         let mut app = Self {
@@ -140,6 +180,11 @@ impl SumiApp {
             generation: 0,
             sent_source: None,
             sent_params: None,
+            palette,
+            chrome,
+            followed_preset,
+            theme_mtime: Palette::modified(),
+            theme_check: Instant::now(),
             view: View::Art,
             fit: true,
             zoom: 1.0,
@@ -154,6 +199,38 @@ impl SumiApp {
             app.load_path(&path);
         }
         app
+    }
+
+    fn refresh_omarchy(&mut self, ctx: &egui::Context) {
+        if self.theme_check.elapsed() < Duration::from_millis(700) {
+            return;
+        }
+        self.theme_check = Instant::now();
+        let modified = Palette::modified();
+        if modified == self.theme_mtime {
+            return;
+        }
+        self.theme_mtime = modified;
+        let palette = Palette::load().unwrap_or_else(Palette::fallback);
+        if palette == self.palette {
+            return;
+        }
+        apply_chrome(ctx, &palette);
+        self.chrome = Chrome::from_palette(&palette);
+        if let Some(preset) = self.followed_preset {
+            let invert = self.params.invert;
+            preset.apply_with(&mut self.params, Some(&palette));
+            self.params.invert = invert;
+        }
+        self.palette = palette;
+    }
+
+    fn preset_button(&mut self, ui: &mut egui::Ui, preset: Preset) {
+        let selected = Preset::matching_with(&self.params, Some(&self.palette)) == Some(preset);
+        if ui.selectable_label(selected, preset.label()).clicked() {
+            preset.apply_with(&mut self.params, Some(&self.palette));
+            self.followed_preset = Some(preset);
+        }
     }
 
     fn load_path(&mut self, path: &Path) {
@@ -334,10 +411,16 @@ impl SumiApp {
 impl eframe::App for SumiApp {
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         eframe::set_value(storage, "sumi-params", &self.params);
+        let name = self
+            .followed_preset
+            .map(|preset| preset.label().to_ascii_lowercase())
+            .unwrap_or_default();
+        eframe::set_value(storage, "sumi-followed-preset", &name);
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        self.refresh_omarchy(&ctx);
         self.poll(&ctx);
         self.take_drop(&ctx);
 
@@ -380,6 +463,8 @@ impl eframe::App for SumiApp {
         }
         if self.busy || !self.font_ready {
             ctx.request_repaint_after(Duration::from_millis(80));
+        } else {
+            ctx.request_repaint_after(Duration::from_millis(800));
         }
 
         let hovering = ui.input(|input| !input.raw.hovered_files.is_empty());
@@ -397,7 +482,7 @@ impl SumiApp {
                 ui.label(egui::RichText::new("Sumi").strong().size(22.0));
                 ui.label(
                     egui::RichText::new("Japanese character art")
-                        .color(MUTED)
+                        .color(self.chrome.muted)
                         .size(13.0),
                 );
                 ui.separator();
@@ -454,7 +539,9 @@ impl SumiApp {
                     ui.label(format!("{}×{} px", spec.width, spec.height));
                     if spec.capped {
                         ui.separator();
-                        ui.label(egui::RichText::new("capped at 8192 px").color(ACCENT));
+                        ui.label(
+                            egui::RichText::new("capped at 8192 px").color(self.chrome.accent),
+                        );
                     }
                 }
                 if let Some(stats) = &self.stats {
@@ -463,7 +550,7 @@ impl SumiApp {
                 }
                 if self.font_ready {
                     ui.separator();
-                    ui.label(egui::RichText::new(&self.font_name).color(MUTED));
+                    ui.label(egui::RichText::new(&self.font_name).color(self.chrome.muted));
                 }
                 if self.busy {
                     ui.separator();
@@ -471,7 +558,7 @@ impl SumiApp {
                 }
                 if let Some(name) = self.source_name() {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.label(egui::RichText::new(name).color(MUTED));
+                        ui.label(egui::RichText::new(name).color(self.chrome.muted));
                     });
                 }
             });
@@ -495,17 +582,16 @@ impl SumiApp {
             .show(ui, |ui| {
                 egui::ScrollArea::vertical().id_salt("controls").show(ui, |ui| {
                     ui.spacing_mut().slider_width = (ui.available_width() - 62.0).max(48.0);
-                    section(ui, "Picture");
-                    slider_u32(ui, &mut self.params.columns, 24..=200, "Detail", "How many characters fit across the picture.");
-                    slider_u32(ui, &mut self.params.cell_px, 10..=48, "Character size", "Pixel height of each character in the saved file.");
+                    section(ui, "Picture", self.chrome.accent);
+                    slider_u32(ui, &mut self.params.columns, 16..=280, "Detail", "How many characters fit across the picture.");
+                    slider_u32(ui, &mut self.params.cell_px, 8..=64, "Character size", "Pixel height of each character in the saved file.");
                     if let Some(spec) = self.predicted() {
                         ui.label(
                             egui::RichText::new(format!("Export {} × {} px", spec.width, spec.height))
-                                .color(MUTED)
+                                .color(self.chrome.muted)
                                 .size(12.0),
                         );
                     }
-                    slider_u32(ui, &mut self.params.levels, 8..=64, "Characters", "How many different characters share the shading.");
 
                     ui.horizontal_wrapped(|ui| {
                         for style in [Style::Kanji, Style::Kana, Style::Halfwidth] {
@@ -517,41 +603,85 @@ impl SumiApp {
                             }
                         }
                     });
-                    ui.label(egui::RichText::new(style_hint(self.params.style)).color(MUTED).size(12.0));
+                    ui.label(
+                        egui::RichText::new(style_hint(self.params.style))
+                            .color(self.chrome.muted)
+                            .size(12.0),
+                    );
 
-                    section(ui, "Tone");
-                    slider_f32(ui, &mut self.params.brightness, -0.35..=0.35, "Brightness", "Shift the whole picture lighter or darker.");
-                    slider_f32(ui, &mut self.params.contrast, 0.5..=2.0, "Contrast", "Push midtones apart.");
-                    slider_f32(ui, &mut self.params.gamma, 0.4..=2.2, "Gamma", "Bend the shadows without moving the extremes as much.");
+                    section(ui, "Glyphs", self.chrome.accent);
+                    slider_u32(ui, &mut self.params.levels, 8..=96, "Variety", "How many different characters share the shading.");
+                    slider_f32(
+                        ui,
+                        &mut self.params.character_floor,
+                        0.0..=0.8,
+                        "Stay on characters",
+                        "Raises the brightest parts off an empty square and onto a written character. Higher keeps even the highlights in kana or kanji.",
+                    );
+                    slider_f32(
+                        ui,
+                        &mut self.params.character_ceiling,
+                        0.35..=1.0,
+                        "Heaviest character",
+                        "1 uses the densest character for black. Lower stops before the ink clumps into a solid mass.",
+                    );
+                    ui.checkbox(&mut self.params.allow_blank, "Empty squares")
+                        .on_hover_text("Let the brightest cells be a blank square. Off by default, so those cells stay characters.");
+                    ui.checkbox(&mut self.params.solid_blocks, "Solid blocks")
+                        .on_hover_text("Let the darkest cells be a filled square instead of a character.");
+
+                    section(ui, "Tone", self.chrome.accent);
+                    slider_f32(ui, &mut self.params.brightness, -0.5..=0.5, "Brightness", "Shift the whole picture lighter or darker.");
+                    slider_f32(ui, &mut self.params.contrast, 0.4..=2.4, "Contrast", "Push midtones apart.");
+                    slider_f32(ui, &mut self.params.gamma, 0.3..=2.6, "Gamma", "Bend the shadows without moving the extremes as much.");
                     slider_f32(ui, &mut self.params.stretch, 0.0..=1.0, "Stretch tones", "Pull a flat photo out to a fuller range of light and dark.");
-                    slider_f32(ui, &mut self.params.outlines, 0.0..=1.0, "Outlines", "Darken edges so faces and shapes read clearly.");
-                    slider_f32(ui, &mut self.params.weight, 0.6..=2.0, "Stroke weight", "Make each character heavier or lighter.");
+                    slider_f32(ui, &mut self.params.outlines, 0.0..=1.4, "Outlines", "Darken edges so faces and shapes read clearly.");
+                    slider_f32(ui, &mut self.params.weight, 0.4..=2.4, "Stroke weight", "Make each character heavier or lighter.");
                     ui.checkbox(&mut self.params.invert, "Invert tones");
                     ui.checkbox(&mut self.params.dither, "Soften gradients")
                         .on_hover_text("Mix neighboring characters across smooth areas. Turn this off for flat poster shapes.");
 
-                    section(ui, "Ink");
+                    section(ui, "Ink", self.chrome.accent);
                     ui.horizontal(|ui| {
-                        preset_button(ui, &mut self.params, Preset::Color);
-                        preset_button(ui, &mut self.params, Preset::Paper);
+                        self.preset_button(ui, Preset::Color);
+                        self.preset_button(ui, Preset::Paper);
                     });
                     ui.horizontal(|ui| {
-                        preset_button(ui, &mut self.params, Preset::Screen);
-                        preset_button(ui, &mut self.params, Preset::Stamp);
+                        self.preset_button(ui, Preset::Screen);
+                        self.preset_button(ui, Preset::Stamp);
                     });
-                    ui.radio_value(&mut self.params.color_mode, ColorMode::Image, "Colors from the photo");
-                    ui.radio_value(&mut self.params.color_mode, ColorMode::Ink, "Single ink");
-                    if self.params.color_mode == ColorMode::Image {
-                        slider_f32(ui, &mut self.params.saturation, 0.0..=2.0, "Color", "How vivid the sampled photo colors are.");
+                    let from_photo = ui.radio_value(
+                        &mut self.params.color_mode,
+                        ColorMode::Image,
+                        "Colors from the photo",
+                    );
+                    let single_ink = ui.radio_value(
+                        &mut self.params.color_mode,
+                        ColorMode::Ink,
+                        "Single ink",
+                    );
+                    if from_photo.changed() || single_ink.changed() {
+                        self.followed_preset = None;
                     }
-                    color_row(ui, "Background", &mut self.params.background);
-                    if self.params.color_mode == ColorMode::Ink {
-                        color_row(ui, "Ink", &mut self.params.ink);
+                    if self.params.color_mode == ColorMode::Image {
+                        slider_f32(ui, &mut self.params.saturation, 0.0..=2.2, "Color", "How vivid the sampled photo colors are.");
+                    }
+                    if color_row(ui, "Background", &mut self.params.background) {
+                        self.followed_preset = None;
+                    }
+                    if self.params.color_mode == ColorMode::Ink
+                        && color_row(ui, "Ink", &mut self.params.ink)
+                    {
+                        self.followed_preset = None;
                     }
 
                     if let Some(tex) = &self.ramp_tex {
-                        section(ui, "Characters in use");
-                        ui.label(egui::RichText::new("Light to dark").color(MUTED).size(12.0));
+                        section(ui, "Characters in use", self.chrome.accent);
+                        ui.label(
+                            egui::RichText::new("Light to dark")
+                                .color(self.chrome.muted)
+                                .size(12.0),
+                        );
                         let size = tex.size();
                         let height = 48.0;
                         let width = height * size[0] as f32 / (size[1].max(1) as f32);
@@ -562,7 +692,10 @@ impl SumiApp {
 
                     ui.add_space(12.0);
                     if ui.button("Reset sliders").clicked() {
+                        let preset = self.followed_preset.unwrap_or(Preset::Color);
                         self.params = Params::default();
+                        preset.apply_with(&mut self.params, Some(&self.palette));
+                        self.followed_preset = Some(preset);
                     }
                     ui.add_space(8.0);
                 });
@@ -573,17 +706,18 @@ impl SumiApp {
         egui::CentralPanel::default().show(ui, |ui| {
             if let Some(error) = &self.error {
                 egui::Frame::NONE
-                    .fill(egui::Color32::from_rgb(92, 36, 30))
-                    .corner_radius(egui::CornerRadius::same(6))
+                    .fill(self.chrome.error)
+                    .corner_radius(egui::CornerRadius::same(4))
                     .inner_margin(egui::Margin::same(8))
                     .show(ui, |ui| {
-                        ui.label(error);
+                        ui.label(egui::RichText::new(error).color(self.chrome.on_accent));
                     });
                 ui.add_space(8.0);
             }
 
             if self.source.is_none() {
-                empty_state(ui, hovering, &mut || self.open_dialog());
+                let muted = self.chrome.muted;
+                empty_state(ui, hovering, muted, &mut || self.open_dialog());
                 return;
             }
 
@@ -738,7 +872,7 @@ fn upload(
     }
 }
 
-fn empty_state(ui: &mut egui::Ui, hovering: bool, open: &mut dyn FnMut()) {
+fn empty_state(ui: &mut egui::Ui, hovering: bool, muted: egui::Color32, open: &mut dyn FnMut()) {
     ui.vertical_centered(|ui| {
         let height = ui.available_height();
         let gap = if height.is_finite() {
@@ -758,7 +892,7 @@ fn empty_state(ui: &mut egui::Ui, hovering: bool, open: &mut dyn FnMut()) {
             egui::RichText::new(
                 "Sumi redraws it with Japanese characters, then saves a PNG or WebP.",
             )
-            .color(MUTED),
+            .color(muted),
         );
         ui.add_space(16.0);
         if ui.button("Open image").clicked() {
@@ -767,7 +901,7 @@ fn empty_state(ui: &mut egui::Ui, hovering: bool, open: &mut dyn FnMut()) {
         ui.add_space(8.0);
         ui.label(
             egui::RichText::new("PNG, JPEG, WebP, GIF, BMP, TIFF")
-                .color(MUTED)
+                .color(muted)
                 .size(12.0),
         );
     });
@@ -799,21 +933,17 @@ fn view_button(ui: &mut egui::Ui, view: &mut View, value: View, label: &str) {
     }
 }
 
-fn preset_button(ui: &mut egui::Ui, params: &mut Params, preset: Preset) {
-    let selected = Preset::matching(params) == Some(preset);
-    if ui.selectable_label(selected, preset.label()).clicked() {
-        preset.apply(params);
-    }
-}
-
-fn color_row(ui: &mut egui::Ui, label: &str, color: &mut Rgb) {
+fn color_row(ui: &mut egui::Ui, label: &str, color: &mut Rgb) -> bool {
+    let mut changed = false;
     ui.horizontal(|ui| {
         ui.label(label);
         let mut channels = [color.r, color.g, color.b];
         if ui.color_edit_button_srgb(&mut channels).changed() {
             *color = Rgb::new(channels[0], channels[1], channels[2]);
+            changed = true;
         }
     });
+    changed
 }
 
 fn slider_u32(
@@ -838,9 +968,9 @@ fn slider_f32(
     ui.add(egui::Slider::new(value, range)).on_hover_text(tip);
 }
 
-fn section(ui: &mut egui::Ui, title: &str) {
-    ui.add_space(10.0);
-    ui.label(egui::RichText::new(title).strong().color(ACCENT).size(12.0));
+fn section(ui: &mut egui::Ui, title: &str, accent: egui::Color32) {
+    ui.add_space(8.0);
+    ui.label(egui::RichText::new(title).strong().color(accent).size(12.0));
     ui.separator();
 }
 
@@ -860,59 +990,85 @@ fn suggested_name(path: Option<&Path>, extension: &str) -> String {
     format!("{stem}-sumi.{extension}")
 }
 
-fn apply_theme(ctx: &egui::Context) {
-    let mut visuals = egui::Visuals::dark();
-    let panel = egui::Color32::from_rgb(34, 29, 26);
-    let bg = egui::Color32::from_rgb(20, 17, 15);
-    visuals.window_fill = panel;
-    visuals.panel_fill = panel;
-    visuals.extreme_bg_color = bg;
-    visuals.faint_bg_color = egui::Color32::from_rgb(46, 39, 35);
-    visuals.code_bg_color = bg;
-    visuals.override_text_color = Some(INK);
-    visuals.weak_text_color = Some(MUTED);
-    visuals.selection.bg_fill = ACCENT;
-    visuals.selection.stroke = egui::Stroke::new(1.0, ACCENT);
-    visuals.hyperlink_color = egui::Color32::from_rgb(226, 168, 112);
+fn apply_chrome(ctx: &egui::Context, palette: &Palette) {
+    let chrome = Chrome::from_palette(palette);
+    let background = rgb(palette.background);
+    let raised = rgb(palette.lighter_background);
+    let well = rgb(palette.darker_background);
+    let border = rgb(palette.border);
+    let hover = mix_color(raised, chrome.accent, 0.18);
+    let open = mix_color(raised, chrome.accent, 0.10);
+    let mut visuals = if palette.dark {
+        egui::Visuals::dark()
+    } else {
+        egui::Visuals::light()
+    };
+    visuals.window_fill = background;
+    visuals.panel_fill = background;
+    visuals.extreme_bg_color = well;
+    visuals.faint_bg_color = raised;
+    visuals.code_bg_color = well;
+    visuals.override_text_color = Some(chrome.text);
+    visuals.weak_text_color = Some(chrome.muted);
+    visuals.selection.bg_fill = chrome.accent;
+    visuals.selection.stroke = egui::Stroke::new(1.0, chrome.accent);
+    visuals.hyperlink_color = chrome.accent;
+    visuals.warn_fg_color = chrome.error;
+    visuals.error_fg_color = chrome.error;
     visuals.slider_trailing_fill = true;
-    visuals.window_corner_radius = egui::CornerRadius::same(8);
-    visuals.menu_corner_radius = egui::CornerRadius::same(6);
+    visuals.window_corner_radius = egui::CornerRadius::same(4);
+    visuals.menu_corner_radius = egui::CornerRadius::same(4);
+    visuals.window_stroke = egui::Stroke::new(1.0, border);
     style_widget(
         &mut visuals.widgets.noninteractive,
-        panel,
-        MUTED,
-        egui::Color32::from_rgb(72, 60, 54),
+        background,
+        chrome.muted,
+        border,
     );
-    style_widget(
-        &mut visuals.widgets.inactive,
-        egui::Color32::from_rgb(54, 46, 41),
-        INK,
-        egui::Color32::from_rgb(72, 60, 54),
-    );
+    style_widget(&mut visuals.widgets.inactive, raised, chrome.text, border);
     style_widget(
         &mut visuals.widgets.hovered,
-        egui::Color32::from_rgb(86, 58, 50),
-        INK,
-        ACCENT,
+        hover,
+        chrome.text,
+        chrome.accent,
     );
     style_widget(
         &mut visuals.widgets.active,
-        ACCENT,
-        egui::Color32::from_rgb(255, 248, 242),
-        ACCENT,
+        chrome.accent,
+        chrome.on_accent,
+        chrome.accent,
     );
-    style_widget(
-        &mut visuals.widgets.open,
-        egui::Color32::from_rgb(72, 48, 42),
-        INK,
-        ACCENT,
-    );
-    ctx.set_theme(egui::ThemePreference::Dark);
+    style_widget(&mut visuals.widgets.open, open, chrome.text, chrome.accent);
+    let preference = if palette.dark {
+        egui::ThemePreference::Dark
+    } else {
+        egui::ThemePreference::Light
+    };
+    let theme = if palette.dark {
+        egui::Theme::Dark
+    } else {
+        egui::Theme::Light
+    };
+    ctx.set_theme(preference);
     ctx.set_visuals(visuals);
-    ctx.style_mut_of(egui::Theme::Dark, |style| {
-        style.spacing.item_spacing = egui::vec2(8.0, 7.0);
-        style.spacing.button_padding = egui::vec2(12.0, 6.0);
+    ctx.style_mut_of(theme, |style| {
+        style.spacing.item_spacing = egui::vec2(6.0, 6.0);
+        style.spacing.button_padding = egui::vec2(10.0, 4.0);
     });
+}
+
+fn rgb(color: Rgb) -> egui::Color32 {
+    egui::Color32::from_rgb(color.r, color.g, color.b)
+}
+
+fn mix_color(from: egui::Color32, to: egui::Color32, toward: f32) -> egui::Color32 {
+    let toward = toward.clamp(0.0, 1.0);
+    let blend = |a: u8, b: u8| (a as f32 + (b as f32 - a as f32) * toward).round() as u8;
+    egui::Color32::from_rgb(
+        blend(from.r(), to.r()),
+        blend(from.g(), to.g()),
+        blend(from.b(), to.b()),
+    )
 }
 
 fn style_widget(
@@ -925,7 +1081,7 @@ fn style_widget(
     widget.weak_bg_fill = fill;
     widget.fg_stroke = egui::Stroke::new(1.0, text);
     widget.bg_stroke = egui::Stroke::new(1.0, stroke);
-    widget.corner_radius = egui::CornerRadius::same(6);
+    widget.corner_radius = egui::CornerRadius::same(4);
 }
 
 fn app_icon() -> egui::IconData {
