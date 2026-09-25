@@ -635,22 +635,24 @@ mod tests {
             }
         };
 
-        let mut params = Params::default();
+        let mut params = Params {
+            columns: 48,
+            cell_px: 12,
+            dither: false,
+            outlines: 0.0,
+            stretch: 0.0,
+            contrast: 1.0,
+            brightness: 0.0,
+            gamma: 1.0,
+            weight: 1.0,
+            character_floor: 0.0,
+            character_ceiling: 1.0,
+            allow_blank: true,
+            solid_blocks: true,
+            color_mode: ColorMode::Ink,
+            ..Params::default()
+        };
         Preset::Paper.apply(&mut params);
-        params.columns = 48;
-        params.cell_px = 12;
-        params.dither = false;
-        params.outlines = 0.0;
-        params.stretch = 0.0;
-        params.contrast = 1.0;
-        params.brightness = 0.0;
-        params.gamma = 1.0;
-        params.weight = 1.0;
-        params.character_floor = 0.0;
-        params.character_ceiling = 1.0;
-        params.allow_blank = true;
-        params.solid_blocks = true;
-        params.color_mode = ColorMode::Ink;
 
         let gradient = gradient_image(96, 32);
         let rendered = engine
@@ -675,6 +677,48 @@ mod tests {
         assert!(
             rendered.characters.chars().count() >= 2,
             "the ramp should contain more than a blank"
+        );
+    }
+
+    #[test]
+    fn a_white_field_is_still_written_in_characters() {
+        let mut engine = match Engine::open() {
+            Ok(engine) => engine,
+            Err(err) => {
+                eprintln!("skipping render test: {err}");
+                return;
+            }
+        };
+        let params = Params {
+            columns: 16,
+            cell_px: 12,
+            color_mode: ColorMode::Ink,
+            background: Rgb::new(255, 255, 255),
+            ink: Rgb::new(0, 0, 0),
+            dither: false,
+            outlines: 0.0,
+            stretch: 0.0,
+            brightness: 0.0,
+            contrast: 1.0,
+            gamma: 1.0,
+            ..Params::default()
+        };
+        let white = RgbaImage::from_pixel(24, 24, Rgba([255, 255, 255, 255]));
+        let rendered = engine
+            .render(9, &white, &params)
+            .expect("render white field");
+        assert!(
+            !rendered
+                .characters
+                .chars()
+                .any(|ch| ch == '　' || ch == ' ' || ch == '■'),
+            "defaults should not use blank squares or blocks: {}",
+            rendered.characters
+        );
+        let luma = mean_luma(&rendered.image, 0, rendered.image.width());
+        assert!(
+            luma < 0.92,
+            "a white field should still be drawn with ink, luma {luma}"
         );
 
         let white = RgbaImage::from_pixel(16, 16, Rgba([255, 255, 255, 255]));

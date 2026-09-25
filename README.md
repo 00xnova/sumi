@@ -36,6 +36,8 @@ The character sets are:
 - **Kana** — hiragana and katakana
 - **Halfwidth** — narrow katakana, the old terminal look
 
+Highlights stay on a written character. Empty squares and solid blocks are off unless you turn them on. **Stay on characters** pushes the bright areas further onto kana or kanji. **Heaviest character** keeps the shadows from turning into a solid mass.
+
 Presets change the ink and the background without resetting the detail sliders. Color samples the photo. Paper, Screen, and Stamp use one ink color.
 
 ## Save from the command line
@@ -45,7 +47,7 @@ cargo run --release -- render photo.jpg photo-sumi.png --columns 120 --style kan
 cargo run --release -- render photo.jpg photo-sumi.webp --preset paper --flat
 ```
 
-`--flat` keeps smooth areas as one character instead of dithering them. `--mono` uses a single ink color. `--style` is `kanji`, `kana`, or `halfwidth`. `--preset` is `color`, `paper`, `screen`, or `stamp`.
+`--flat` keeps smooth areas as one character instead of dithering them. `--mono` uses a single ink color. `--style` is `kanji`, `kana`, or `halfwidth`. `--preset` is `color`, `paper`, `screen`, or `stamp`. `--floor` keeps highlights on a character, `--empty` allows blank squares, and `--blocks` allows a solid block in the shadows.
 
 If the font is somewhere else, point Sumi at it. A collection needs the face index after `#`:
 

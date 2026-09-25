@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, SystemTime};
 
 use eframe::egui;
 use image::RgbaImage;
@@ -117,7 +117,6 @@ struct SumiApp {
     chrome: Chrome,
     followed_preset: Option<Preset>,
     theme_mtime: Option<SystemTime>,
-    theme_check: Instant,
     view: View,
     fit: bool,
     zoom: f32,
@@ -134,10 +133,14 @@ impl SumiApp {
         let (job_tx, job_rx) = mpsc::channel::<Job>();
         let (event_tx, event_rx) = mpsc::channel::<WorkerEvent>();
         let ctx = cc.egui_ctx.clone();
+        let theme_ctx = ctx.clone();
         let worker = thread::Builder::new()
             .name("sumi-render".to_string())
             .spawn(move || worker_loop(job_rx, event_tx, ctx))
             .ok();
+        let _ = thread::Builder::new()
+            .name("sumi-theme".to_string())
+            .spawn(move || watch_theme(theme_ctx));
 
         let mut params = Params::default();
         let mut followed_preset = None;
@@ -184,7 +187,6 @@ impl SumiApp {
             chrome,
             followed_preset,
             theme_mtime: Palette::modified(),
-            theme_check: Instant::now(),
             view: View::Art,
             fit: true,
             zoom: 1.0,
@@ -202,10 +204,6 @@ impl SumiApp {
     }
 
     fn refresh_omarchy(&mut self, ctx: &egui::Context) {
-        if self.theme_check.elapsed() < Duration::from_millis(700) {
-            return;
-        }
-        self.theme_check = Instant::now();
         let modified = Palette::modified();
         if modified == self.theme_mtime {
             return;
@@ -463,8 +461,6 @@ impl eframe::App for SumiApp {
         }
         if self.busy || !self.font_ready {
             ctx.request_repaint_after(Duration::from_millis(80));
-        } else {
-            ctx.request_repaint_after(Duration::from_millis(800));
         }
 
         let hovering = ui.input(|input| !input.raw.hovered_files.is_empty());
@@ -489,7 +485,7 @@ impl SumiApp {
                 if ui.button("Open").on_hover_text("Ctrl+O").clicked() {
                     self.open_dialog();
                 }
-                let can_save = self.full.is_some();
+                let can_save = self.full.is_some() && !self.busy;
                 if ui
                     .add_enabled(can_save, egui::Button::new("Save PNG"))
                     .on_hover_text("Ctrl+S")
@@ -611,17 +607,19 @@ impl SumiApp {
 
                     section(ui, "Glyphs", self.chrome.accent);
                     slider_u32(ui, &mut self.params.levels, 8..=96, "Variety", "How many different characters share the shading.");
+                    let floor_max = (self.params.character_ceiling - 0.05).clamp(0.0, 0.8);
                     slider_f32(
                         ui,
                         &mut self.params.character_floor,
-                        0.0..=0.8,
+                        0.0..=floor_max,
                         "Stay on characters",
                         "Raises the brightest parts off an empty square and onto a written character. Higher keeps even the highlights in kana or kanji.",
                     );
+                    let ceiling_min = (self.params.character_floor + 0.05).clamp(0.35, 1.0);
                     slider_f32(
                         ui,
                         &mut self.params.character_ceiling,
-                        0.35..=1.0,
+                        ceiling_min..=1.0,
                         "Heaviest character",
                         "1 uses the densest character for black. Lower stops before the ink clumps into a solid mass.",
                     );
@@ -788,6 +786,18 @@ impl SumiApp {
                 }
             }
         });
+    }
+}
+
+fn watch_theme(ctx: egui::Context) {
+    let mut seen = Palette::modified();
+    loop {
+        thread::sleep(Duration::from_secs(2));
+        let modified = Palette::modified();
+        if modified != seen {
+            seen = modified;
+            ctx.request_repaint();
+        }
     }
 }
 
@@ -965,7 +975,8 @@ fn slider_f32(
     tip: &str,
 ) {
     ui.label(label).on_hover_text(tip);
-    ui.add(egui::Slider::new(value, range)).on_hover_text(tip);
+    ui.add(egui::Slider::new(value, range).max_decimals(2))
+        .on_hover_text(tip);
 }
 
 fn section(ui: &mut egui::Ui, title: &str, accent: egui::Color32) {

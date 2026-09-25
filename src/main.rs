@@ -63,6 +63,18 @@ enum Command {
         /// How vivid sampled photo colors are. 1 leaves them unchanged.
         #[arg(long)]
         saturation: Option<f32>,
+        /// Keep highlights on a written character, from 0 to 0.85. Default 0.34.
+        #[arg(long)]
+        floor: Option<f32>,
+        /// Stop before the densest character. 1 uses the heaviest glyph for black.
+        #[arg(long)]
+        ceiling: Option<f32>,
+        /// Allow an empty square in the brightest cells.
+        #[arg(long)]
+        empty: bool,
+        /// Allow a solid block in the darkest cells.
+        #[arg(long)]
+        blocks: bool,
         /// Swap light and dark.
         #[arg(long)]
         invert: bool,
@@ -102,6 +114,10 @@ fn dispatch() -> Result<()> {
             outlines,
             weight,
             saturation,
+            floor,
+            ceiling,
+            empty,
+            blocks,
             invert,
             flat,
             mono,
@@ -120,6 +136,10 @@ fn dispatch() -> Result<()> {
             outlines,
             weight,
             saturation,
+            floor,
+            ceiling,
+            empty,
+            blocks,
             invert,
             flat,
             mono,
@@ -143,6 +163,10 @@ struct RenderSettings {
     outlines: Option<f32>,
     weight: Option<f32>,
     saturation: Option<f32>,
+    floor: Option<f32>,
+    ceiling: Option<f32>,
+    empty: bool,
+    blocks: bool,
     invert: bool,
     flat: bool,
     mono: bool,
@@ -191,6 +215,18 @@ fn render_file(settings: RenderSettings) -> Result<()> {
     }
     if let Some(saturation) = settings.saturation {
         params.saturation = saturation;
+    }
+    if let Some(floor) = settings.floor {
+        params.character_floor = floor;
+    }
+    if let Some(ceiling) = settings.ceiling {
+        params.character_ceiling = ceiling;
+    }
+    if settings.empty {
+        params.allow_blank = true;
+    }
+    if settings.blocks {
+        params.solid_blocks = true;
     }
     if settings.invert {
         params.invert = true;
